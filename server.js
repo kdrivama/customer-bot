@@ -393,16 +393,42 @@ const PROVIDER = PROVIDERS[AI_PROVIDER];
 const AI_API_KEY = process.env[PROVIDER.keyEnv];
 const AI_BASE_URL = process.env.AI_BASE_URL || PROVIDER.baseUrl;
 
-function modelsFor(providerName) {
-  // An explicit AI_MODELS list only describes the primary provider's models; the
-  // other provider's slugs are named completely differently.
-  if (providerName === AI_PROVIDER) {
-    const explicit = (process.env.AI_MODELS || process.env.OPENROUTER_MODELS || '')
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
-    if (explicit.length) return explicit;
+// Model names are provider-specific, so an entry has to be routed to the provider it
+// actually belongs to. OpenRouter slugs are always "vendor/model" and may carry a
+// ":free" suffix; DeepSeek names never contain a slash. An entry may also name its
+// provider explicitly as "deepseek:deepseek-chat".
+function inferProvider(model) {
+  return model.includes('/') ? 'openrouter' : 'deepseek';
+}
+
+function parseModelSpec(raw) {
+  const idx = raw.indexOf(':');
+  if (idx > 0) {
+    const head = raw.slice(0, idx);
+    // Only a known provider name counts as a prefix — otherwise the ":free" in an
+    // OpenRouter slug would be mistaken for one.
+    if (PROVIDERS[head]) {
+      const model = raw.slice(idx + 1);
+      return { provider: head, model };
+    }
   }
+  return { provider: inferProvider(raw), model: raw };
+}
+
+const EXPLICIT_MODELS = (process.env.AI_MODELS || process.env.OPENROUTER_MODELS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+  .map(parseModelSpec);
+
+function modelsFor(providerName) {
+  // Route an explicit list by the provider each name belongs to, so a stale
+  // AI_MODELS left over from another provider cannot send its slugs to an API that
+  // has never heard of them.
+  const explicit = EXPLICIT_MODELS
+    .filter(entry => entry.provider === providerName)
+    .map(entry => entry.model);
+  if (explicit.length) return explicit;
 
   const models = [];
   // On OpenRouter, honour the older single-model vars as a preference — they are
