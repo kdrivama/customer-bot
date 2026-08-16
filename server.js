@@ -7,6 +7,11 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Render terminates TLS at its own proxy, so without this req.ip is the proxy's
+// address — the same value for every visitor. The per-IP AI budget below would then
+// be one global bucket that a single enthusiastic user drains for everyone.
+app.set('trust proxy', true);
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -865,6 +870,14 @@ app.get('/healthz', (req, res) => {
     aiEnabled: AI_ENABLED,
     aiMode: AI_MODE,
     aiModels: AI_MODELS,
+    // Exposed because an exhausted budget and a dead API key look identical from
+    // the outside: both just show scripted replies.
+    aiBudget: {
+      limitPerHour: AI_RATE_LIMIT_PER_HOUR,
+      usedByYou: (aiUsage.get(req.ip) || {}).count || 0,
+      trackedClients: aiUsage.size
+    },
+    clientIp: req.ip,
     activeSessions: Object.keys(sessions).length
   });
 });
