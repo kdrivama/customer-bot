@@ -357,11 +357,16 @@ const AI_MODELS = (process.env.OPENROUTER_MODELS || '')
   .filter(Boolean);
 
 if (!AI_MODELS.length) {
-  // Honour the older single-model vars if they are still set on the host.
+  // No explicit chain. Honour the older single-model vars as a preference — they are
+  // still set on hosts provisioned before OPENROUTER_MODELS existed — but append the
+  // defaults behind them, so a stale dashboard cannot silently shrink the chain back
+  // to one or two slugs and push the fallback rate up.
   if (process.env.OPENROUTER_MODEL) AI_MODELS.push(process.env.OPENROUTER_MODEL);
   if (process.env.OPENROUTER_FALLBACK_MODEL) AI_MODELS.push(process.env.OPENROUTER_FALLBACK_MODEL);
+  for (const model of DEFAULT_AI_MODELS) {
+    if (!AI_MODELS.includes(model)) AI_MODELS.push(model);
+  }
 }
-if (!AI_MODELS.length) AI_MODELS.push(...DEFAULT_AI_MODELS);
 
 const AI_MODEL = AI_MODELS[0];
 // A turn must not hang while the chain works through busy providers.
