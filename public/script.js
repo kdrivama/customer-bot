@@ -141,7 +141,9 @@ const scenarios = {
         name: "Michael Chen",
         description: "Return Rejected",
         evidence: {
-            damageImage: "https://i.ibb.co/8XqYKrN/damage-proof.png"
+            // Must match the URL server.js declares for this scenario. The previous
+            // i.ibb.co image 404s, which showed the trainee a broken evidence link.
+            damageImage: "https://drive.google.com/file/d/1zP60wW7ryl9XsCCTxxaMEddQl4vgMaDp"
         },
         initialMessage: "What the f*ck! I returned those headphones because the product is damaged when i received, and now you're telling me I don't get a refund? I want to speak to someone who can actually help, or I'm going to report this to the police!"
     }
