@@ -1,0 +1,64 @@
+<!-- Injected into <body> by script.js on DOMContentLoaded. -->
+
+<div id="escalation-modal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <!-- Step 1: the escalation decision -->
+    <div id="escalation-step-1">
+      <h2>Before you close this chat</h2>
+      <p class="modal-lead">Does this case need to be escalated to a manager?</p>
+      <p class="modal-hint">
+        Escalate only when the customer has asked for one, or when the resolution
+        sits outside your authority. Escalating a case you already resolved wastes
+        the queue; failing to escalate a requested one is a compliance miss.
+      </p>
+      <div class="modal-actions">
+        <button id="escalation-yes" class="modal-btn primary">Yes, escalate</button>
+        <button id="escalation-no" class="modal-btn secondary">No, resolved at my level</button>
+      </div>
+    </div>
+
+    <!-- Step 2: handover details (Michael path) -->
+    <div id="escalation-step-2" class="hidden">
+      <h2>Escalation handover</h2>
+      <p class="modal-lead">Confirm the contact details the manager should use.</p>
+
+      <label class="modal-label" for="escalation-phone">Contact phone</label>
+      <input type="tel" id="escalation-phone" class="modal-input" placeholder="+1 555 0100" />
+
+      <label class="modal-label" for="escalation-email">Contact email</label>
+      <input type="email" id="escalation-email" class="modal-input" placeholder="customer@example.com" />
+
+      <label class="modal-label" for="escalation-team">Route to</label>
+      <select id="escalation-team" class="modal-input">
+        <option value="">Select a team…</option>
+        <option value="returns">Returns &amp; Refunds</option>
+        <option value="logistics">Logistics / Warehouse</option>
+        <option value="legal">Legal &amp; Escalations</option>
+        <option value="retention">Customer Retention</option>
+      </select>
+
+      <div class="modal-actions">
+        <button id="escalation-submit" class="modal-btn primary">Submit escalation</button>
+      </div>
+    </div>
+
+    <!-- Populated by script.js if the backend returns feedback -->
+    <div id="escalation-feedback" class="hidden"></div>
+  </div>
+</div>
+
+<div id="fallback-modal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <h2>Guided mode</h2>
+    <p class="modal-lead">
+      This session is running the scripted training flow. Pick the best reply from
+      the options shown after each customer message.
+    </p>
+    <p class="modal-hint">
+      Your greeting speed, empathy, probing, hold time and closing are all scored.
+    </p>
+    <div class="modal-actions">
+      <button id="fallback-ok" class="modal-btn primary">Got it</button>
+    </div>
+  </div>
+</div>

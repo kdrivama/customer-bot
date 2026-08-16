@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Customer Service Training Simulator</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Scenario Selection Screen -->
+        <div id="scenario-selection" class="screen">
+            <h1>Customer Service Training Simulator</h1>
+            <div class="scenario-card" data-scenario="sarah">
+                <h2>Sarah Johnson</h2>
+                <p>Wrong Item Received</p>
+            </div>
+            <div class="scenario-card" data-scenario="michael">
+                <h2>Michael Chen</h2>
+                <p>Return Rejected</p>
+                <div class="warning">⚠️ Uses Strong Language</div>
+            </div>
+        </div>
+        
+        <!-- Chat Interface -->
+        <div id="chat-interface" class="screen hidden">
+            <div class="header">
+                <div class="customer-profile">
+                    <h2 id="customer-name"></h2>
+                    <p id="scenario-description"></p>
+                </div>
+                <div class="timers">
+                    <div class="timer" id="greeting-timer">
+                        <span>Greeting:</span>
+                        <span class="countdown">15s</span>
+                    </div>
+                    <div class="timer" id="inactivity-timer">
+                        <span>Inactivity:</span>
+                        <span class="countdown">180s</span>
+                    </div>
+                </div>
+                <div class="score-display">
+                    <span>Score:</span>
+                    <span id="current-score">0</span>
+                    <span id="star-rating">☆☆☆☆☆</span>
+                    <div id="api-status" style="font-size: 0.8em; margin-top: 5px; color: #666;">
+                        AI Mode: Ready
+                    </div>
+                </div>
+            </div>
+            
+            <div id="chat-container">
+                <div id="chat-messages"></div>
+            </div>
+            
+            <div id="violation-warnings"></div>
+            
+            <div class="input-area">
+                <textarea id="user-input" placeholder="Type your response..."></textarea>
+                <div class="button-container">
+                    <button id="send-btn">Send</button>
+                    <button id="end-chat-btn">End Session</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Results Screen -->
+        <div id="results-screen" class="screen hidden">
+            <h1>Training Session Complete</h1>
+            <div class="score-summary">
+                <div class="stars" id="final-stars">☆☆☆☆☆</div>
+                <div class="score-text">You scored <span id="final-score">0</span>/100</div>
+            </div>
+            
+            <div class="violations-section">
+                <h2>Performance Feedback</h2>
+                <ul id="violations-list"></ul>
+            </div>
+            
+            <div id="feedback-tips">
+                <!-- Feedback tips will be inserted here -->
+            </div>
+            
+            <div class="actions">
+                <button id="restart-btn">Start New Session</button>
+            </div>
+        </div>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html>

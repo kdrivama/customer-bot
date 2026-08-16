@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: customer-service-trainer
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: AI_MODE
+        value: rephrase
+      - key: OPENROUTER_MODEL
+        value: google/gemma-4-26b-a4b-it:free
+      - key: OPENROUTER_FALLBACK_MODEL
+        value: openai/gpt-oss-20b:free
+      - key: AI_RATE_LIMIT_PER_HOUR
+        value: "60"
+      # Set these in the Render dashboard, not here.
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: HTTP_REFERER
+        sync: false

@@ -1,0 +1,141 @@
+/* Escalation + fallback modals. Loaded by script.js after styles.css, so it can
+   rely on the :root custom properties defined there. */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(44, 62, 80, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 20px;
+}
+
+.modal-overlay.hidden {
+  display: none;
+}
+
+.modal-box {
+  background: white;
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  padding: 30px;
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-box h2 {
+  color: var(--primary);
+  margin-bottom: 12px;
+  font-size: 1.5rem;
+}
+
+.modal-lead {
+  color: #333;
+  margin-bottom: 10px;
+}
+
+.modal-hint {
+  color: #6c757d;
+  font-size: 0.9rem;
+  margin-bottom: 20px;
+}
+
+.modal-label {
+  display: block;
+  font-weight: bold;
+  font-size: 0.85rem;
+  color: var(--dark);
+  margin: 14px 0 6px;
+}
+
+.modal-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+.modal-input:focus {
+  outline: none;
+  border-color: var(--secondary);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+  flex-wrap: wrap;
+}
+
+.modal-btn {
+  flex: 1;
+  min-width: 140px;
+  padding: 12px 20px;
+  font-size: 1rem;
+  font-weight: bold;
+  font-family: inherit;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+
+.modal-btn:hover {
+  opacity: 0.9;
+}
+
+.modal-btn.primary {
+  background: var(--secondary);
+  color: white;
+}
+
+.modal-btn.secondary {
+  background: var(--light);
+  color: var(--dark);
+}
+
+#escalation-feedback {
+  margin-top: 20px;
+  padding: 15px;
+  border-radius: 8px;
+  background: #f8f9fa;
+  border-left: 4px solid var(--warning);
+}
+
+#escalation-feedback.hidden {
+  display: none;
+}
+
+#escalation-feedback.correct {
+  border-left-color: var(--success);
+}
+
+#escalation-feedback.incorrect {
+  border-left-color: var(--danger);
+}
+
+/* The chat's own "Timer extended" notices, which had no styling before. */
+.system-message {
+  align-self: center;
+  background: var(--light);
+  color: var(--dark);
+  font-size: 0.85rem;
+  padding: 6px 14px;
+  border-radius: 12px;
+}
+
+@media (max-width: 600px) {
+  .modal-box {
+    padding: 20px;
+  }
+
+  .modal-btn {
+    flex: 1 1 100%;
+  }
+}
