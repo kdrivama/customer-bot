@@ -9,12 +9,16 @@ services:
     envVars:
       - key: AI_MODE
         value: rephrase
-      # Tried in order until one returns a usable line. All free slugs.
-      - key: OPENROUTER_MODELS
-        value: google/gemma-4-26b-a4b-it:free,poolside/laguna-s-2.1:free,nvidia/nemotron-3-ultra-550b-a55b:free,openai/gpt-oss-20b:free
+      - key: AI_PROVIDER
+        value: deepseek
+      # Blank uses the provider default: deepseek-chat for DeepSeek.
+      - key: AI_MODELS
+        value: ""
       - key: AI_RATE_LIMIT_PER_HOUR
         value: "60"
       # Set these in the Render dashboard, not here.
+      - key: DEEPSEEK_API_KEY
+        sync: false
       - key: OPENROUTER_API_KEY
         sync: false
       - key: HTTP_REFERER

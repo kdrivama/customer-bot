@@ -343,32 +343,71 @@ app.post('/api/session/start', (req, res) => {
 // --- AI configuration ---
 const AI_MODE = process.env.AI_MODE || 'rephrase';
 
-// Free slugs get rate-limited upstream without warning, so a turn tries several in
-// order rather than giving up on the first 429. Measured 2026-08-16 against the
-// actual rephrase prompt; these were the fast ones that returned usable dialogue.
-// Deliberately excluded: nemotron-3.5-content-safety (a moderation model, replies
-// "User Safety: safe"), nemotron-3.5-lightning (leaks its reasoning into content),
-// lfm-2.5-2.6b and nemotron-nano-12b-v2-vl (32s and 15s responses).
-const DEFAULT_AI_MODELS = [
-  'google/gemma-4-26b-a4b-it:free',
-  'poolside/laguna-s-2.1:free',
-  'nvidia/nemotron-3-ultra-550b-a55b:free',
-  'openai/gpt-oss-20b:free'
-];
+// Both providers speak the OpenAI chat-completions shape, so only the base URL, the
+// key and the model names differ.
+const PROVIDERS = {
+  deepseek: {
+    baseUrl: 'https://api.deepseek.com/v1',
+    keyEnv: 'DEEPSEEK_API_KEY',
+    // Paid per token with no daily request cap. deepseek-chat is the non-reasoning
+    // model, which is what this needs — deepseek-reasoner would spend tokens
+    // thinking about a one-line rewrite.
+    defaultModels: ['deepseek-chat']
+  },
+  openrouter: {
+    baseUrl: 'https://openrouter.ai/api/v1',
+    keyEnv: 'OPENROUTER_API_KEY',
+    // Free slugs get rate-limited upstream without warning, so a turn tries several
+    // in order. Measured 2026-08-16 against the actual rephrase prompt; these were
+    // the fast ones that returned usable dialogue. Deliberately excluded:
+    // nemotron-3.5-content-safety (a moderation model, replies "User Safety: safe"),
+    // nemotron-3.5-lightning (leaks its reasoning into content), lfm-2.5-2.6b and
+    // nemotron-nano-12b-v2-vl (32s and 15s responses).
+    defaultModels: [
+      'google/gemma-4-26b-a4b-it:free',
+      'poolside/laguna-s-2.1:free',
+      'nvidia/nemotron-3-ultra-550b-a55b:free',
+      'openai/gpt-oss-20b:free'
+    ]
+  }
+};
 
-const AI_MODELS = (process.env.OPENROUTER_MODELS || '')
+// Prefer whichever key is actually present, so switching provider is a matter of
+// setting a key rather than remembering to set AI_PROVIDER too.
+const REQUESTED_PROVIDER = process.env.AI_PROVIDER
+  || (process.env.DEEPSEEK_API_KEY ? 'deepseek' : 'openrouter');
+
+// If the requested provider has no key but the other one does, use that instead. A
+// half-applied config — AI_PROVIDER switched but the key not yet added — would
+// otherwise turn the AI off completely rather than falling back to what still works.
+function resolveProvider(name) {
+  if (PROVIDERS[name] && process.env[PROVIDERS[name].keyEnv]) return name;
+  for (const [candidate, config] of Object.entries(PROVIDERS)) {
+    if (process.env[config.keyEnv]) return candidate;
+  }
+  return PROVIDERS[name] ? name : 'openrouter';
+}
+
+const AI_PROVIDER = resolveProvider(REQUESTED_PROVIDER);
+const PROVIDER = PROVIDERS[AI_PROVIDER];
+const AI_API_KEY = process.env[PROVIDER.keyEnv];
+const AI_BASE_URL = process.env.AI_BASE_URL || PROVIDER.baseUrl;
+
+const AI_MODELS = (process.env.AI_MODELS || process.env.OPENROUTER_MODELS || '')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
 
 if (!AI_MODELS.length) {
-  // No explicit chain. Honour the older single-model vars as a preference — they are
-  // still set on hosts provisioned before OPENROUTER_MODELS existed — but append the
-  // defaults behind them, so a stale dashboard cannot silently shrink the chain back
-  // to one or two slugs and push the fallback rate up.
-  if (process.env.OPENROUTER_MODEL) AI_MODELS.push(process.env.OPENROUTER_MODEL);
-  if (process.env.OPENROUTER_FALLBACK_MODEL) AI_MODELS.push(process.env.OPENROUTER_FALLBACK_MODEL);
-  for (const model of DEFAULT_AI_MODELS) {
+  // No explicit chain. On OpenRouter, honour the older single-model vars as a
+  // preference — they are still set on hosts provisioned before the chain existed —
+  // but append the defaults behind them, so a stale dashboard cannot silently shrink
+  // the chain back to one slug and push the fallback rate up.
+  if (AI_PROVIDER === 'openrouter') {
+    if (process.env.OPENROUTER_MODEL) AI_MODELS.push(process.env.OPENROUTER_MODEL);
+    if (process.env.OPENROUTER_FALLBACK_MODEL) AI_MODELS.push(process.env.OPENROUTER_FALLBACK_MODEL);
+  }
+  for (const model of PROVIDER.defaultModels) {
     if (!AI_MODELS.includes(model)) AI_MODELS.push(model);
   }
 }
@@ -377,15 +416,27 @@ const AI_MODEL = AI_MODELS[0];
 // A turn must not hang while the chain works through busy providers.
 const AI_TOTAL_BUDGET_MS = Number(process.env.AI_TOTAL_BUDGET_MS || 25000);
 const AI_PER_CALL_TIMEOUT_MS = 15000;
-const AI_ENABLED = Boolean(process.env.OPENROUTER_API_KEY) && AI_MODE !== 'off';
+const AI_ENABLED = Boolean(AI_API_KEY) && AI_MODE !== 'off';
 
 // Reasoning models spend part of the budget on hidden reasoning tokens and return
 // empty content if it runs out, so this stays well above the visible line length.
 const AI_MAX_TOKENS = 400;
 
-function callOpenRouter(messages, maxTokens, model) {
+function callChatCompletion(messages, maxTokens, model) {
+  const headers = {
+    'Authorization': `Bearer ${AI_API_KEY}`,
+    'Content-Type': 'application/json'
+  };
+
+  // OpenRouter attributes usage by these; DeepSeek ignores them, but there is no
+  // reason to send them where they mean nothing.
+  if (AI_PROVIDER === 'openrouter') {
+    headers['HTTP-Referer'] = process.env.HTTP_REFERER || 'http://localhost:3000';
+    headers['X-Title'] = 'Customer Service Trainer';
+  }
+
   return axios.post(
-    'https://openrouter.ai/api/v1/chat/completions',
+    `${AI_BASE_URL}/chat/completions`,
     {
       model: model || AI_MODEL,
       messages,
@@ -396,12 +447,7 @@ function callOpenRouter(messages, maxTokens, model) {
       presence_penalty: 0.1
     },
     {
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'HTTP-Referer': process.env.HTTP_REFERER || 'http://localhost:3000',
-        'X-Title': 'Customer Service Trainer',
-        'Content-Type': 'application/json'
-      },
+      headers,
       timeout: AI_PER_CALL_TIMEOUT_MS,
       validateStatus: status => status < 500
     }
@@ -482,7 +528,7 @@ or sexual content, and never threaten violence.`
 
     let text = '';
     try {
-      const response = await callOpenRouter(messages, AI_MAX_TOKENS, model);
+      const response = await callChatCompletion(messages, AI_MAX_TOKENS, model);
 
       // The free-model quota is account-wide across every :free slug and resets
       // daily, so once it is gone the rest of the chain cannot help — and each
@@ -536,7 +582,7 @@ app.post('/api/chat', async (req, res) => {
   // and evidence flow stay idle.
   if (AI_ENABLED && AI_MODE === 'freeform' && !session.forceFallback && consumeAiBudget(req)) {
     try {
-      const response = await callOpenRouter([
+      const response = await callChatCompletion([
         {
           role: 'system',
           content: `${scenarios[session.scenario].prompt}\nCurrent step: ${session.state.currentStep}`
@@ -908,6 +954,7 @@ app.get('/healthz', (req, res) => {
     ok: true,
     aiEnabled: AI_ENABLED,
     aiMode: AI_MODE,
+    aiProvider: AI_PROVIDER,
     aiModels: AI_MODELS,
     // Exposed because an exhausted budget and a dead API key look identical from
     // the outside: both just show scripted replies.
