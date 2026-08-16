@@ -429,6 +429,29 @@ function maskProfanity(text) {
     .replace(PROFANITY_STANDALONE, match => match[0] + '*' + match.slice(2));
 }
 
+// Set when OpenRouter reports the account-wide daily free-model quota is spent.
+// Until it passes, no AI call is attempted at all.
+let aiCooldownUntil = 0;
+
+// Distinguishes "this account is out of free requests for today", which is fatal for
+// every :free model at once, from an ordinary per-model 429 worth retrying elsewhere.
+function readDailyQuotaReset(body) {
+  const error = body && body.error;
+  if (!error) return 0;
+
+  const isDaily = error.metadata && error.metadata.limit_source === 'openrouter_free_tier_daily';
+  const mentionsDaily = typeof error.message === 'string' && error.message.includes('free-models-per-day');
+  if (!isDaily && !mentionsDaily) return 0;
+
+  const reset = Number(
+    error.metadata && error.metadata.headers && error.metadata.headers['X-RateLimit-Reset']
+  );
+  // Fall back to an hour if the reset timestamp is missing or nonsensical, so a
+  // malformed response cannot disable the AI indefinitely.
+  if (!Number.isFinite(reset) || reset <= Date.now()) return Date.now() + 60 * 60 * 1000;
+  return reset;
+}
+
 async function rephraseInCharacter(session, scriptedLine) {
   if (!scriptedLine) return { text: scriptedLine, used: false };
 
@@ -450,6 +473,8 @@ or sexual content, and never threaten violence.`
     { role: 'user', content: `Rewrite this line: ${scriptedLine}` }
   ];
 
+  if (Date.now() < aiCooldownUntil) return { text: scriptedLine, used: false };
+
   const deadline = Date.now() + AI_TOTAL_BUDGET_MS;
 
   for (const model of AI_MODELS) {
@@ -458,6 +483,20 @@ or sexual content, and never threaten violence.`
     let text = '';
     try {
       const response = await callOpenRouter(messages, AI_MAX_TOKENS, model);
+
+      // The free-model quota is account-wide across every :free slug and resets
+      // daily, so once it is gone the rest of the chain cannot help — and each
+      // attempt spends another request from the very pool that is exhausted.
+      // Stop immediately and stay off until the reset the API reports.
+      if (response.status === 429) {
+        const reset = readDailyQuotaReset(response.data);
+        if (reset) {
+          aiCooldownUntil = reset;
+          break;
+        }
+        continue;
+      }
+
       if (response.status === 200 && response.data.choices && response.data.choices[0]) {
         text = String(response.data.choices[0].message.content || '').trim();
       }
@@ -878,6 +917,9 @@ app.get('/healthz', (req, res) => {
       trackedClients: aiUsage.size
     },
     clientIp: req.ip,
+    // Non-zero means OpenRouter's account-wide daily free-model quota is spent and
+    // no AI call will be attempted until this time.
+    aiQuotaExhaustedUntil: aiCooldownUntil ? new Date(aiCooldownUntil).toISOString() : null,
     activeSessions: Object.keys(sessions).length
   });
 });
