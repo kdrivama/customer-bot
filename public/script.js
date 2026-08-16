@@ -394,6 +394,8 @@ async function selectOption(optionId, optionText) {
             }
         }
 
+        updateAiStatus(data.aiActive);
+
         // Apply the score before any early return below, otherwise the turn that
         // opens the guided-mode modal leaves the header showing a stale 0/100.
         if (data.state) {
@@ -521,10 +523,9 @@ async function sendMessage(message = null) {
         
         // Set fallback mode
         fallbackMode = data.fallbackMode;
-        
+        updateAiStatus(data.aiActive);
+
         if (data.fallbackMode) {
-            console.log('Running in fallback mode');
-            
             // Show options if available
             if (data.options) {
                 displayOptions(data.options);
@@ -558,6 +559,20 @@ async function sendMessage(message = null) {
         console.error('Communication error:', error);
         addMessage("I'm experiencing technical difficulties, but I can still help you...", 'bot');
         fallbackMode = true;
+    }
+}
+
+// Report whether the customer's last line was rewritten by the AI or came straight
+// from the script. Every turn is "fallbackMode" because the script always drives the
+// options, so that flag must not be used to answer this question.
+function updateAiStatus(aiActive) {
+    if (!apiStatus) return;
+    if (aiActive) {
+        apiStatus.textContent = '🟢 AI live — replies in character';
+        apiStatus.style.color = '#2ecc71';
+    } else {
+        apiStatus.textContent = '⚪ Scripted reply';
+        apiStatus.style.color = '#999';
     }
 }
 

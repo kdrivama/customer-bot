@@ -504,7 +504,11 @@ app.post('/api/chat', async (req, res) => {
 
   return res.json({
     botResponse,
+    // fallbackMode stays true because the scripted engine always owns the options
+    // and scoring. It says nothing about whether the AI ran — aiActive does, and
+    // the two were being conflated in the UI.
     fallbackMode: true,
+    aiActive: apiUsed === 'openrouter',
     options: scripted.options,
     showEvidence: scripted.showEvidence,
     evidenceType: scripted.evidenceType,
