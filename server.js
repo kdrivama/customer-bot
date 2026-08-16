@@ -393,26 +393,43 @@ const PROVIDER = PROVIDERS[AI_PROVIDER];
 const AI_API_KEY = process.env[PROVIDER.keyEnv];
 const AI_BASE_URL = process.env.AI_BASE_URL || PROVIDER.baseUrl;
 
-const AI_MODELS = (process.env.AI_MODELS || process.env.OPENROUTER_MODELS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+function modelsFor(providerName) {
+  // An explicit AI_MODELS list only describes the primary provider's models; the
+  // other provider's slugs are named completely differently.
+  if (providerName === AI_PROVIDER) {
+    const explicit = (process.env.AI_MODELS || process.env.OPENROUTER_MODELS || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (explicit.length) return explicit;
+  }
 
-if (!AI_MODELS.length) {
-  // No explicit chain. On OpenRouter, honour the older single-model vars as a
-  // preference — they are still set on hosts provisioned before the chain existed —
-  // but append the defaults behind them, so a stale dashboard cannot silently shrink
-  // the chain back to one slug and push the fallback rate up.
-  if (AI_PROVIDER === 'openrouter') {
-    if (process.env.OPENROUTER_MODEL) AI_MODELS.push(process.env.OPENROUTER_MODEL);
-    if (process.env.OPENROUTER_FALLBACK_MODEL) AI_MODELS.push(process.env.OPENROUTER_FALLBACK_MODEL);
+  const models = [];
+  // On OpenRouter, honour the older single-model vars as a preference — they are
+  // still set on hosts provisioned before the chain existed — but append the
+  // defaults behind them, so a stale dashboard cannot silently shrink the chain
+  // back to one slug and push the fallback rate up.
+  if (providerName === 'openrouter') {
+    if (process.env.OPENROUTER_MODEL) models.push(process.env.OPENROUTER_MODEL);
+    if (process.env.OPENROUTER_FALLBACK_MODEL) models.push(process.env.OPENROUTER_FALLBACK_MODEL);
   }
-  for (const model of PROVIDER.defaultModels) {
-    if (!AI_MODELS.includes(model)) AI_MODELS.push(model);
+  for (const model of PROVIDERS[providerName].defaultModels) {
+    if (!models.includes(model)) models.push(model);
   }
+  return models;
 }
 
-const AI_MODEL = AI_MODELS[0];
+// The chain crosses providers: the primary's models first, then any other provider
+// that has a key. So a DeepSeek balance running dry at 2am falls through to
+// OpenRouter's free models rather than dropping every visitor to scripted lines.
+const AI_CHAIN = [];
+for (const name of [AI_PROVIDER, ...Object.keys(PROVIDERS).filter(n => n !== AI_PROVIDER)]) {
+  if (!process.env[PROVIDERS[name].keyEnv]) continue;
+  for (const model of modelsFor(name)) AI_CHAIN.push({ provider: name, model });
+}
+
+const AI_MODELS = AI_CHAIN.map(entry => `${entry.provider}:${entry.model}`);
+const AI_MODEL = AI_CHAIN.length ? AI_CHAIN[0].model : null;
 // A turn must not hang while the chain works through busy providers.
 const AI_TOTAL_BUDGET_MS = Number(process.env.AI_TOTAL_BUDGET_MS || 25000);
 const AI_PER_CALL_TIMEOUT_MS = 15000;
@@ -422,21 +439,25 @@ const AI_ENABLED = Boolean(AI_API_KEY) && AI_MODE !== 'off';
 // empty content if it runs out, so this stays well above the visible line length.
 const AI_MAX_TOKENS = 400;
 
-function callChatCompletion(messages, maxTokens, model) {
+function callChatCompletion(messages, maxTokens, model, providerName) {
+  const name = providerName || AI_PROVIDER;
+  const provider = PROVIDERS[name];
   const headers = {
-    'Authorization': `Bearer ${AI_API_KEY}`,
+    'Authorization': `Bearer ${process.env[provider.keyEnv]}`,
     'Content-Type': 'application/json'
   };
 
   // OpenRouter attributes usage by these; DeepSeek ignores them, but there is no
   // reason to send them where they mean nothing.
-  if (AI_PROVIDER === 'openrouter') {
+  if (name === 'openrouter') {
     headers['HTTP-Referer'] = process.env.HTTP_REFERER || 'http://localhost:3000';
     headers['X-Title'] = 'Customer Service Trainer';
   }
 
+  const baseUrl = name === AI_PROVIDER ? AI_BASE_URL : provider.baseUrl;
+
   return axios.post(
-    `${AI_BASE_URL}/chat/completions`,
+    `${baseUrl}/chat/completions`,
     {
       model: model || AI_MODEL,
       messages,
@@ -475,9 +496,10 @@ function maskProfanity(text) {
     .replace(PROFANITY_STANDALONE, match => match[0] + '*' + match.slice(2));
 }
 
-// Set when OpenRouter reports the account-wide daily free-model quota is spent.
-// Until it passes, no AI call is attempted at all.
-let aiCooldownUntil = 0;
+// Per provider, set when it reports an account-wide quota is spent. Until it passes,
+// that provider is skipped entirely — but the chain still tries the other one, which
+// is the point of keeping both keys configured.
+const aiCooldownUntil = new Map();
 
 // Distinguishes "this account is out of free requests for today", which is fatal for
 // every :free model at once, from an ordinary per-model 429 worth retrying elsewhere.
@@ -519,27 +541,30 @@ or sexual content, and never threaten violence.`
     { role: 'user', content: `Rewrite this line: ${scriptedLine}` }
   ];
 
-  if (Date.now() < aiCooldownUntil) return { text: scriptedLine, used: false };
-
   const deadline = Date.now() + AI_TOTAL_BUDGET_MS;
 
-  for (const model of AI_MODELS) {
+  for (const { provider, model } of AI_CHAIN) {
     if (Date.now() >= deadline) break;
+    // This provider is out of quota; skip straight to the next one's models.
+    if (Date.now() < (aiCooldownUntil.get(provider) || 0)) continue;
 
     let text = '';
     try {
-      const response = await callChatCompletion(messages, AI_MAX_TOKENS, model);
+      const response = await callChatCompletion(messages, AI_MAX_TOKENS, model, provider);
 
-      // The free-model quota is account-wide across every :free slug and resets
-      // daily, so once it is gone the rest of the chain cannot help — and each
-      // attempt spends another request from the very pool that is exhausted.
-      // Stop immediately and stay off until the reset the API reports.
+      // An account-wide quota is spent across every model that provider offers, so
+      // trying its remaining slugs cannot help — and on OpenRouter each attempt
+      // spends another request from the very pool that is exhausted. Park this
+      // provider until its reset and carry on with the other one.
       if (response.status === 429) {
         const reset = readDailyQuotaReset(response.data);
-        if (reset) {
-          aiCooldownUntil = reset;
-          break;
-        }
+        if (reset) aiCooldownUntil.set(provider, reset);
+        continue;
+      }
+
+      // A bad or unfunded key fails identically on every model, so stop asking.
+      if (response.status === 401 || response.status === 402 || response.status === 403) {
+        aiCooldownUntil.set(provider, Date.now() + 10 * 60 * 1000);
         continue;
       }
 
@@ -966,7 +991,9 @@ app.get('/healthz', (req, res) => {
     clientIp: req.ip,
     // Non-zero means OpenRouter's account-wide daily free-model quota is spent and
     // no AI call will be attempted until this time.
-    aiQuotaExhaustedUntil: aiCooldownUntil ? new Date(aiCooldownUntil).toISOString() : null,
+    aiQuotaExhaustedUntil: Object.fromEntries(
+      [...aiCooldownUntil].map(([provider, until]) => [provider, new Date(until).toISOString()])
+    ),
     activeSessions: Object.keys(sessions).length
   });
 });
