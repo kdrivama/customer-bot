@@ -337,10 +337,36 @@ app.post('/api/session/start', (req, res) => {
 
 // --- AI configuration ---
 const AI_MODE = process.env.AI_MODE || 'rephrase';
-const AI_MODEL = process.env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free';
-// Free-tier models get rate-limited upstream without warning, so a second slug is
-// tried before giving up on the turn.
-const AI_FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL || 'openai/gpt-oss-20b:free';
+
+// Free slugs get rate-limited upstream without warning, so a turn tries several in
+// order rather than giving up on the first 429. Measured 2026-08-16 against the
+// actual rephrase prompt; these were the fast ones that returned usable dialogue.
+// Deliberately excluded: nemotron-3.5-content-safety (a moderation model, replies
+// "User Safety: safe"), nemotron-3.5-lightning (leaks its reasoning into content),
+// lfm-2.5-2.6b and nemotron-nano-12b-v2-vl (32s and 15s responses).
+const DEFAULT_AI_MODELS = [
+  'google/gemma-4-26b-a4b-it:free',
+  'poolside/laguna-s-2.1:free',
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'openai/gpt-oss-20b:free'
+];
+
+const AI_MODELS = (process.env.OPENROUTER_MODELS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+if (!AI_MODELS.length) {
+  // Honour the older single-model vars if they are still set on the host.
+  if (process.env.OPENROUTER_MODEL) AI_MODELS.push(process.env.OPENROUTER_MODEL);
+  if (process.env.OPENROUTER_FALLBACK_MODEL) AI_MODELS.push(process.env.OPENROUTER_FALLBACK_MODEL);
+}
+if (!AI_MODELS.length) AI_MODELS.push(...DEFAULT_AI_MODELS);
+
+const AI_MODEL = AI_MODELS[0];
+// A turn must not hang while the chain works through busy providers.
+const AI_TOTAL_BUDGET_MS = Number(process.env.AI_TOTAL_BUDGET_MS || 25000);
+const AI_PER_CALL_TIMEOUT_MS = 15000;
 const AI_ENABLED = Boolean(process.env.OPENROUTER_API_KEY) && AI_MODE !== 'off';
 
 // Reasoning models spend part of the budget on hidden reasoning tokens and return
@@ -366,7 +392,7 @@ function callOpenRouter(messages, maxTokens, model) {
         'X-Title': 'Customer Service Trainer',
         'Content-Type': 'application/json'
       },
-      timeout: 30000,
+      timeout: AI_PER_CALL_TIMEOUT_MS,
       validateStatus: status => status < 500
     }
   );
@@ -414,7 +440,11 @@ or sexual content, and never threaten violence.`
     { role: 'user', content: `Rewrite this line: ${scriptedLine}` }
   ];
 
-  for (const model of [AI_MODEL, AI_FALLBACK_MODEL]) {
+  const deadline = Date.now() + AI_TOTAL_BUDGET_MS;
+
+  for (const model of AI_MODELS) {
+    if (Date.now() >= deadline) break;
+
     let text = '';
     try {
       const response = await callOpenRouter(messages, AI_MAX_TOKENS, model);
@@ -425,15 +455,16 @@ or sexual content, and never threaten violence.`
       continue;
     }
 
-    // Reject an empty rewrite, and one long enough that the model has started
-    // explaining itself instead of staying in character.
-    if (!text || text.length > scriptedLine.length * 3 + 80) continue;
+    // Reject an empty rewrite, one long enough that the model has started explaining
+    // itself instead of staying in character, and one containing a blank line —
+    // which is how the reasoning-leaking models present their working.
+    if (!text || text.length > scriptedLine.length * 3 + 80 || text.includes('\n\n')) continue;
 
     return { text: maskProfanity(text.replace(/^["']|["']$/g, '')), used: true };
   }
 
-  // Both slugs unusable this turn. The scripted line still carries the session, so
-  // this is a silent, invisible degradation rather than an error.
+  // Every slug unusable this turn. The scripted line still carries the session, and
+  // the UI reports the degradation via aiActive.
   return { text: scriptedLine, used: false };
 }
 
@@ -828,6 +859,7 @@ app.get('/healthz', (req, res) => {
     ok: true,
     aiEnabled: AI_ENABLED,
     aiMode: AI_MODE,
+    aiModels: AI_MODELS,
     activeSessions: Object.keys(sessions).length
   });
 });

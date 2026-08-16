@@ -9,10 +9,9 @@ services:
     envVars:
       - key: AI_MODE
         value: rephrase
-      - key: OPENROUTER_MODEL
-        value: google/gemma-4-26b-a4b-it:free
-      - key: OPENROUTER_FALLBACK_MODEL
-        value: openai/gpt-oss-20b:free
+      # Tried in order until one returns a usable line. All free slugs.
+      - key: OPENROUTER_MODELS
+        value: google/gemma-4-26b-a4b-it:free,poolside/laguna-s-2.1:free,nvidia/nemotron-3-ultra-550b-a55b:free,openai/gpt-oss-20b:free
       - key: AI_RATE_LIMIT_PER_HOUR
         value: "60"
       # Set these in the Render dashboard, not here.
