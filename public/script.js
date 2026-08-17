@@ -127,6 +127,9 @@ let waitingPeriod = null;
 // True while the trainee types their own replies. False once the session has
 // dropped to the multiple-choice fallback.
 let chatMode = false;
+// Set once the trainee escalates during the conversation, so the end-of-session
+// modal does not ask about a decision they have already made.
+let escalationHandled = false;
 
 // The composer and the option list are mutually exclusive: whichever is active is
 // how the trainee answers this turn.
@@ -245,6 +248,7 @@ async function startScenario(scenario) {
         addMessage(data.initialMessage || scenarios[scenario].initialMessage, 'bot');
         updateAiStatus(data.aiActive);
         chatMode = Boolean(data.chatMode);
+        escalationHandled = false;
         setComposer(chatMode);
         
         // Start timers
@@ -594,6 +598,8 @@ async function sendMessage(message = null) {
             }
         }
 
+        if (data.state && data.state.escalationHandled) escalationHandled = true;
+
         // Options arriving means the AI dropped out and this session is now running
         // the multiple-choice fallback.
         if (data.options && data.options.length) {
@@ -682,8 +688,9 @@ function updateScore(points) {
 
 // End session and show results
 async function endSession() {
-    // Show escalation modal before ending session
-    if (document.getElementById('escalation-modal')) {
+    // Only ask about escalation if it did not already come up in the conversation —
+    // a trainee who escalated mid-chat should not be quizzed on it again.
+    if (!escalationHandled && document.getElementById('escalation-modal')) {
         await showEscalationModal();
     }
     // ... keep existing code (timer cleanup and results display)

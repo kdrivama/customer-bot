@@ -25,6 +25,20 @@ const scenarios = {
     // Her scenario card carries no strong-language warning, so her dialogue must
     // stay clean however angry she gets.
     allowsProfanity: false,
+    // Documents the agent must ask for by name. Tracked from the AI's judgement and
+    // scored at the end — missing one costs points but never blocks progress, so a
+    // trainee always finishes the run and sees what they skipped.
+    // `match` decides the credit, not the model: asking for a document by name is
+    // exactly what this stage teaches, and a model asked to recall which nouns
+    // appeared reported all three for a bare "send me some proof".
+    requiredEvidence: [
+      { key: 'barcode', label: 'the barcode of the wrong item', match: /bar\s?code/i },
+      { key: 'packagingSlip', label: 'the packaging slip', match: /pack(ag|ing)\w*\s+(slip|list)|packing\s?slip/i },
+      { key: 'shippingLabel', label: 'the outer box shipping label', match: /shipping\s?label|outer\s?box|air\s?way\s?bill|waybill/i }
+    ],
+    // This case is resolved at agent level; escalating it is the error.
+    escalationExpected: false,
+    deEscalatesWhen: 'you are offered a replacement AND a voucher for the trouble',
     initialMessage: "I ordered an iPhone 15 Pro but got an iPhone 14! This is unacceptable! I need a replacement now with compensation!",
     evidence: {
       barcode: "https://drive.google.com/file/d/1JWu_ht4350vqCv3ERzcuSvjv9Iqv3qOy",
@@ -136,13 +150,18 @@ const scenarios = {
         nextStep: 'completed'
       }
     },
-    prompt: `You're Sarah Johnson, angry about receiving wrong iPhone. 
-             Your order ID is PAY-789XLB. 
-             Provide evidence only when asked specifically about:
-             - Barcode
-             - Packaging slip
-             - Shipping label
-             Calm down only when offered replacement + voucher.`
+    // Character and facts only. Progression, evidence release and de-escalation are
+    // governed by the step machine and the injected stage rules — a hard gate here
+    // ("provide evidence only when asked specifically about X") overrides them and
+    // makes the customer reject answers the trainer has already accepted.
+    prompt: `You are Sarah Johnson. You ordered an iPhone 15 Pro and received an
+             iPhone 14. Your order ID is PAY-789XLB. You are angry, impatient and
+             blunt, but never vulgar.
+             You have the barcode, the packaging slip and the outer box shipping
+             label to hand, and you send them when the agent asks you for supporting
+             documents — though if they ask vaguely you complain that they clearly
+             do not believe you.
+             You want the correct phone and compensation for the trouble.`
   },
   michael: {
     orderId: 'KLX-13PLC',
@@ -150,6 +169,12 @@ const scenarios = {
     description: "Return Rejected",
     // His card shows the "Uses Strong Language" badge.
     allowsProfanity: true,
+    requiredEvidence: [
+      { key: 'video', label: 'video proof of the item before the packaging was opened', match: /video|unboxing|recording/i }
+    ],
+    // He explicitly demands a manager, so failing to escalate is the error.
+    escalationExpected: true,
+    deEscalatesWhen: 'your case is escalated to a manager and the agent confirms how you will be contacted',
     initialMessage: "What the f*ck! I returned those headphones because the product is damaged when i received, and now you're telling me I don't get a refund? I want to speak to someone who can actually help, or I'm going to report this to the police!",
     evidence: {
       damageImage: "https://drive.google.com/file/d/1zP60wW7ryl9XsCCTxxaMEddQl4vgMaDp"
@@ -188,13 +213,13 @@ const scenarios = {
       waiting_period: {
         options: [
           { id: 3, text: "You returned a used item. That's against policy.", correct: false },
-          { id: 1, text: "Michael, thank you for your patience. We received your return, but the warehouse flagged signs of physical damage. May I ask: was the item damaged before shipping it back?", correct: true },
+          { id: 1, text: "Michael, thank you for your patience. We received your return, but the warehouse flagged signs of physical damage. Could you share video proof of the product before you opened the packaging?", correct: true },
           { id: 2, text: "The warehouse has rejected your item. You broke it, so we can't refund you.", correct: false }
         ],
         correctResponse: "I don't have a video, but the picture is here: [evidence]. That's your warehouse issue!",
         wrongResponse: "Are you accusing me of breaking it? What kind of service is this?",
         wrongOptions: [
-          { id: 1, text: "Michael, thank you for your patience. We received your return, but the warehouse flagged signs of physical damage. May I ask a video showing the product before opening packaging?", correct: true },
+          { id: 1, text: "Michael, thank you for your patience. We received your return, but the warehouse flagged signs of physical damage. Could you share video proof of the product before you opened the packaging?", correct: true },
           { id: 2, text: "You returned a used item. That's against policy.", correct: false }
         ],
         nextStep: 'evidence_provided',
@@ -250,13 +275,29 @@ const scenarios = {
         nextStep: 'completed'
       }
     },
-    prompt: `You're Michael Chen, furious about rejected return. 
-             Your order ID is KLX-13PLC.
-             Use vulgar language. 
-             Only provide damage evidence when asked for "video proof". 
-             Accept partial refund, yet demand to speak to manager still. while being asked if the email and phone number in the account is still active, answeer "yes"`
+    // Character and facts only — see the note on Sarah's prompt.
+    prompt: `You are Michael Chen. You returned headphones that arrived damaged and
+             your refund has been rejected. Your order ID is KLX-13PLC. You are
+             furious and confrontational, and you threaten to involve a lawyer or
+             the police.
+             You have a photograph of the damage but no video. When the agent asks
+             you for proof you send the photo and insist the damage was the
+             warehouse's fault, not yours.
+             You will accept a partial refund, but you want to speak to a manager.
+             If asked whether the phone number and email on your account are still
+             active, say yes.`
   }
 };
+
+// --- Scoring budget ---
+// Both scenarios are 7 steps with one hold, so a flawless run banks exactly 100:
+// 6 + 7*12 + 4 + 6. Previously a run could bank 130 against a cap of 100, which
+// left 30 points of slack — a trainee could fail two whole steps and still show
+// 100, and every rubric deduction below was absorbed by the headroom.
+const GREETING_POINTS = 6;
+const STEP_POINTS = 12;
+const HOLD_POINTS = 4;
+const COMPLETION_POINTS = 6;
 
 // --- In-memory session storage ---
 const sessions = {};
@@ -310,6 +351,9 @@ app.post('/api/session/start', async (req, res) => {
     history: [],
     startTime: Date.now(),
     state: {
+      // calculateFinalScore only receives state, but needs the scenario to know
+      // which documents were mandatory and whether escalation was expected.
+      scenarioKey: scenario,
       currentStep: 'initial',
       points: 0,
       violations: [],
@@ -494,7 +538,7 @@ const AI_ENABLED = Boolean(AI_API_KEY) && AI_MODE !== 'off';
 // empty content if it runs out, so this stays well above the visible line length.
 const AI_MAX_TOKENS = 400;
 
-function callChatCompletion(messages, maxTokens, model, providerName, jsonMode) {
+function callChatCompletion(messages, maxTokens, model, providerName, jsonMode, temperature) {
   const name = providerName || AI_PROVIDER;
   const provider = PROVIDERS[name];
   const headers = {
@@ -514,7 +558,7 @@ function callChatCompletion(messages, maxTokens, model, providerName, jsonMode) 
   const body = {
     model: model || AI_MODEL,
     messages,
-    temperature: 0.7,
+    temperature: typeof temperature === 'number' ? temperature : 0.7,
     max_tokens: maxTokens,
     top_p: 0.9,
     frequency_penalty: 0.1,
@@ -660,8 +704,22 @@ violence.`
 // satisfied the current step, which is what lets a trainee phrase it their own way.
 function roleplaySystemPrompt(session) {
   const scenario = scenarios[session.scenario];
+  const stepNames = Object.keys(scenario.steps);
+  const index = stepNames.indexOf(session.state.currentStep);
   const step = scenario.steps[session.state.currentStep];
   const objective = (step.options.find(o => o.correct) || {}).text || '';
+
+  // The judge sees the whole sequence, not just the current objective. Without it,
+  // a message aimed at a later stage — jumping to the solution before collecting
+  // evidence — was being credited for the step it skipped, and every later message
+  // was then judged one step behind.
+  const remaining = stepNames.slice(index + 1)
+    .map(name => (scenario.steps[name].options.find(o => o.correct) || {}).text)
+    .filter(Boolean);
+
+  const evidenceList = (scenario.requiredEvidence || [])
+    .map(item => `"${item.key}" = ${item.label}`)
+    .join('; ');
 
   return `${scenario.prompt}
 
@@ -669,28 +727,51 @@ You are the CUSTOMER in a training simulator. The other party is a customer serv
 agent in training. Never break character, never coach them, never mention training,
 scoring or that you are an AI.
 
-The agent's current objective for this stage is to do the equivalent of:
+This case moves through ${stepNames.length} stages. You are at stage ${index + 1}.
+
+The agent's objective for THIS stage is to do the equivalent of:
 "${objective}"
 
-Judge their latest message on substance, not wording. Any phrasing that genuinely
-achieves the objective counts — "may I have your reference number" is the same as
-asking for the order ID. Politeness alone is not enough; they must actually do it.
+${remaining.length ? `Things that belong to LATER stages, not this one:
+${remaining.map(t => `- ${t}`).join('\n')}
+
+If their message skips ahead to one of those instead of doing the current stage,
+set addressesCurrentStep and stepSatisfied both false, and react with impatience —
+you are not ready to move on, and you still want the current thing dealt with.` : ''}
+
+Judge on substance, not wording. Any phrasing that genuinely achieves the objective
+counts — "may I have your reference number" is the same as asking for the order ID.
+Politeness alone is not enough; they must actually do it.
+
+${step.showEvidence ? `This stage is about asking for supporting evidence. Any genuine request for proof or
+documents satisfies it — set stepSatisfied true even if they did not name every
+document. Record in evidenceRequested only the ones they actually named, so an
+incomplete request moves the case along but is still visible afterwards.` : ''}
 
 If they achieved it, your reply must convey the substance of: "${step.correctResponse || 'acknowledge and move on'}"
 If they did not, react like: "${step.wrongResponse || 'press them again, unsatisfied'}"
 
+YOUR MOOD: you start angry. You soften only when ${scenario.deEscalatesWhen}. Once
+that has happened, stay noticeably calmer for the rest of the conversation — still
+firm, but no longer hostile. Do not soften for anything less.
+
 Keep your reply under 45 words and in character.
 
 ${scenario.allowsProfanity
-  ? 'You swear when angry, but never write a swear word out in full — mask it as f*ck or sh*t.'
+  ? 'You swear when angry, but never write a swear word out in full — mask it as f*ck or sh*t. Use at most one such word, and not in every message; most replies should have none.'
   : 'You are angry and blunt but you NEVER swear. No profanity of any kind, not even masked.'}
 No slurs, no sexual content, no threats of violence.
 
 Reply with JSON only, no markdown fence:
-{"reply":"<your next message as the customer>","stepSatisfied":true|false,"empathy":true|false,"askedOrderId":true|false,"offeredSolution":true|false,"thanked":true|false,"closed":true|false,"unprofessional":true|false}
+{"reply":"<your next message as the customer>","addressesCurrentStep":true|false,"stepSatisfied":true|false,"empathy":true|false,"askedOrderId":true|false,"requestsEvidence":true|false,"evidenceRequested":[],"escalated":true|false,"offeredSolution":true|false,"thanked":true|false,"closed":true|false,"unprofessional":true|false}
 
+addressesCurrentStep: is their message even aimed at this stage, rather than a later one?
+stepSatisfied: did they actually achieve this stage's objective? Only true if addressesCurrentStep is also true.
 empathy: did they acknowledge the customer's feelings?
 askedOrderId: did they ask for the order ID or an equivalent reference?
+requestsEvidence: did they ask the customer to supply ANY proof, documents, photos or evidence, however vaguely?
+evidenceRequested: array of keys for any of these they explicitly asked for in THIS message${evidenceList ? ` — ${evidenceList}` : ''}. Use [] if none.
+escalated: did they escalate to a manager or supervisor, or state one will make contact?
 offeredSolution: did they propose a concrete remedy?
 thanked: did they thank the customer?
 closed: did they properly close or ask if anything else is needed?
@@ -722,9 +803,25 @@ function parseRoleplayJson(raw) {
 async function aiRoleplayTurn(session, message) {
   const deadline = Date.now() + AI_TOTAL_BUDGET_MS;
 
+  // The transcript goes inside a single user message rather than as prior assistant
+  // turns. Given plain-prose assistant messages to imitate, the model copies that
+  // pattern and abandons the JSON format entirely — with response_format it returns
+  // whitespace, without it a bare line of dialogue. Neither parses.
+  const transcript = session.history
+    .filter(m => m.role)
+    .slice(-10)
+    .map(m => `${m.role === 'assistant' ? 'CUSTOMER' : 'AGENT'}: ${m.content}`)
+    .join('\n');
+
   const messages = [
     { role: 'system', content: roleplaySystemPrompt(session) },
-    ...session.history.filter(m => m.role).slice(-10)
+    {
+      role: 'user',
+      content: `Conversation so far:
+${transcript || '(the customer has just opened the chat)'}
+
+Reply with the JSON object described in your instructions, and nothing else.`
+    }
   ];
 
   for (const { provider, model } of AI_CHAIN) {
@@ -732,7 +829,12 @@ async function aiRoleplayTurn(session, message) {
     if (Date.now() < (aiCooldownUntil.get(provider) || 0)) continue;
 
     try {
-      const response = await callChatCompletion(messages, AI_MAX_TOKENS, model, provider, true);
+      // The same call writes dialogue and grades the trainee. Dialogue wants some
+      // temperature, but grading at 0.7 made the verdict flip between runs on the
+      // same message — a trainee naming all three documents scored 70 once and 95
+      // the next time. Grading consistency wins; the wording still varies because
+      // the conversation does.
+      const response = await callChatCompletion(messages, AI_MAX_TOKENS, model, provider, true, 0.3);
 
       if (response.status === 429) {
         const reset = readDailyQuotaReset(response.data);
@@ -758,9 +860,20 @@ async function aiRoleplayTurn(session, message) {
   return null;
 }
 
+// "Asked the customer to supply something" — a verb of sending paired with a thing
+// that can be sent. Deliberately broad: naming the right documents is what earns the
+// points, while any honest attempt is enough to move the case along.
+const EVIDENCE_VERB = /\b(send|sent|share|provide|upload|forward|attach|email|give|show)\b/i;
+const EVIDENCE_NOUN = /\b(proof|evidence|document|documents|documentation|photo|photos|picture|pictures|image|images|barcode|bar code|slip|label|video|receipt|invoice)\b/i;
+
+function asksForEvidence(message) {
+  const text = String(message || '');
+  return EVIDENCE_VERB.test(text) && EVIDENCE_NOUN.test(text);
+}
+
 // Applies a judged turn to the session: advances the step machine, scores, and
 // releases evidence or a hold exactly where the scripted flow would have.
-function applyRoleplayTurn(session, turn) {
+function applyRoleplayTurn(session, turn, userMessage) {
   const scenario = scenarios[session.scenario];
   const state = session.state;
   const step = scenario.steps[state.currentStep];
@@ -771,16 +884,48 @@ function applyRoleplayTurn(session, turn) {
   if (turn.thanked) state.thanked = true;
   if (turn.closed) state.closed = true;
 
+  // Which required documents they named, matched against what they actually wrote.
+  // Scored at the end, never blocking.
+  for (const item of scenario.requiredEvidence || []) {
+    if (item.match && item.match.test(userMessage || '')) state.probing[item.key] = true;
+  }
+
+  // Escalating during the conversation is the natural moment for it, so record it
+  // here rather than waiting for the end-of-session modal to ask again.
+  if (turn.escalated && !state.escalationHandled) {
+    const correct = Boolean(scenario.escalationExpected);
+    state.escalationHandled = true;
+    state.escalation = { escalate: true, correct, handover: null, handoverComplete: false, source: 'chat' };
+    if (!correct) {
+      state.violations.push({
+        category: 'escalation',
+        reason: 'Escalated a case that was already resolved at agent level',
+        points: 15
+      });
+    }
+  }
+
   let showEvidence = false;
   let evidenceType = null;
   let waitingPeriod = null;
 
-  if (turn.stepSatisfied) {
-    state.points = Math.min(100, state.points + 15);
+  // A message aimed at a later stage must not be credited for the one it skipped.
+  let satisfied = Boolean(turn.stepSatisfied) && turn.addressesCurrentStep !== false;
+
+  // The evidence stage is decided here rather than by the model's own verdict, which
+  // reported requestsEvidence false even for a message naming all three documents.
+  // Any genuine request for proof moves the case on — which documents they actually
+  // named is scored separately — so a trainee is never stuck guessing the wording.
+  if (step.showEvidence && (turn.requestsEvidence || asksForEvidence(userMessage))) {
+    satisfied = true;
+  }
+
+  if (satisfied) {
+    state.points = Math.min(100, state.points + STEP_POINTS);
     state.attemptCount = 0;
 
     if (step.needsWait) {
-      state.points = Math.min(100, state.points + 5);
+      state.points = Math.min(100, state.points + HOLD_POINTS);
       waitingPeriod = {
         duration: 120000,
         warningMessage: "Hello? Don't tell me you're ghosting me too!",
@@ -798,11 +943,14 @@ function applyRoleplayTurn(session, turn) {
     } else if (step.nextStep === 'completed') {
       state.terminated = true;
       state.completed = true;
-      state.points = Math.min(100, state.points + 10);
+      state.points = Math.min(100, state.points + COMPLETION_POINTS);
     }
   } else {
     state.attemptCount = (state.attemptCount || 0) + 1;
-    if (turn.unprofessional) {
+    // Once per session, not per turn — repeating the same fault should not compound
+    // into an unrecoverable score.
+    if (turn.unprofessional && turn.addressesCurrentStep !== false && !state.unprofessionalLogged) {
+      state.unprofessionalLogged = true;
       state.violations.push({
         category: 'wrong_response',
         reason: 'Unprofessional or dismissive reply to the customer',
@@ -863,7 +1011,7 @@ app.post('/api/chat', async (req, res) => {
 
   if (canChat) {
     const turn = await aiRoleplayTurn(session, message);
-    if (turn) return res.json(applyRoleplayTurn(session, turn));
+    if (turn) return res.json(applyRoleplayTurn(session, turn, message));
   }
 
   // Scripted engine drives the session in every other mode.
@@ -922,7 +1070,7 @@ function updateSessionState(session, message) {
   if (!state.greetingSent && state.currentStep === 'initial') {
     const timeSinceStart = Date.now() - session.startTime;
     if (timeSinceStart <= 15000) {
-      state.points = Math.min(100, state.points + 10);
+      state.points = Math.min(100, state.points + GREETING_POINTS);
       state.greetingSent = true;
     }
   }
@@ -992,7 +1140,7 @@ function processFallbackMessage(session, message, optionId) {
   if (!session.state.greetingSent && session.state.currentStep === 'initial') {
     const timeSinceStart = Date.now() - session.startTime;
     if (timeSinceStart <= 15000) {
-      session.state.points = Math.min(100, session.state.points + 10);
+      session.state.points = Math.min(100, session.state.points + GREETING_POINTS);
       session.state.greetingSent = true;
     }
   }
@@ -1029,7 +1177,7 @@ function processFallbackMessage(session, message, optionId) {
   if (session.scenario === 'sarah' && (session.state.currentStep === 'voucher_confirmation' || session.state.currentStep === 'reconfirmation')) {
     const stepConfig = scenario.steps[session.state.currentStep];
     if (selectedOption && selectedOption.correct) {
-      session.state.points = Math.min(100, session.state.points + 15);
+      session.state.points = Math.min(100, session.state.points + STEP_POINTS);
       session.state.attemptCount = 0;
       botResponse = stepConfig.correctResponse;
       if (session.state.currentStep === 'reconfirmation') {
@@ -1055,7 +1203,7 @@ function processFallbackMessage(session, message, optionId) {
     }
   } else if (selectedOption && selectedOption.correct) {
     // Correct generic choice
-    session.state.points = Math.min(100, session.state.points + 15);
+    session.state.points = Math.min(100, session.state.points + STEP_POINTS);
     session.state.attemptCount = 0;
     botResponse = currentStep.correctResponse;
 
@@ -1065,7 +1213,7 @@ function processFallbackMessage(session, message, optionId) {
         warningMessage: "Hello? Don't tell me you're ghosting me too!",
         terminationMessage: "This is what I expected. Typical!"
       };
-      session.state.points = Math.min(100, session.state.points + 5);
+      session.state.points = Math.min(100, session.state.points + HOLD_POINTS);
     }
 
     if (currentStep.showEvidence) {
@@ -1082,7 +1230,7 @@ function processFallbackMessage(session, message, optionId) {
       // session, but only a misconduct termination should be reported as one.
       session.state.terminated = true;
       session.state.completed = true;
-      session.state.points = Math.min(100, session.state.points + 10);
+      session.state.points = Math.min(100, session.state.points + COMPLETION_POINTS);
       if (session.state.reholdCount > 3 && !session.state.reholdPenaltyApplied) {
         session.state.points = Math.max(0, session.state.points - 20);
         session.state.violations.push({ category: 'on_hold', reason: 'Used Re-hold more than 3 times (-20 points)' });
@@ -1132,10 +1280,31 @@ function calculateFinalScore(state) {
     percentage = Math.max(0, percentage - (violation.points || 0));
   }
 
+  const scenario = scenarios[state.scenarioKey] || {};
+  const required = scenario.requiredEvidence || [];
+
+  // Mandatory probing was tracked but never scored, so a run that never asked for a
+  // single document still returned 100. Each missing item costs a share of a fixed
+  // 15-point budget, so no scenario is penalised merely for requiring more of them.
+  const evidencePenalty = required.length ? Math.round(15 / required.length) : 0;
+  const missedEvidence = required
+    .filter(item => !state.probing[item.key])
+    .map(item => ({
+      category: 'probing',
+      reason: `Did not request ${item.label}`,
+      points: evidencePenalty
+    }));
+
+  const escalationMiss = scenario.escalationExpected && !state.escalationHandled
+    ? { category: 'escalation', reason: 'Did not escalate after the customer requested a manager', points: 15 }
+    : null;
+
   const deductions = [
     state.missedReconfirm && { category: 'reconfirm', reason: 'Missed reconfirmation step', points: 10 },
     !state.empathyShown && { category: 'empathy', reason: 'Failed to show empathy', points: 10 },
     !state.probing.orderId && { category: 'probing', reason: 'Did not ask for order ID', points: 5 },
+    ...missedEvidence,
+    escalationMiss,
     !state.thanked && { category: 'solution', reason: 'Did not thank customer', points: 5 },
     !state.closed && { category: 'closing', reason: 'Did not properly close session', points: 5 }
   ].filter(Boolean);
@@ -1173,7 +1342,19 @@ app.post('/api/escalation', (req, res) => {
     return res.status(400).json({ error: 'Session not found' });
   }
 
-  const shouldEscalate = session.scenario === 'michael';
+  // Already decided during the conversation, which is the natural place for it.
+  // Asking again at the end would double-count the same decision.
+  if (session.state.escalationHandled && session.state.escalation && session.state.escalation.source === 'chat') {
+    return res.json({
+      correct: session.state.escalation.correct,
+      alreadyHandled: true,
+      feedback: session.state.escalation.correct
+        ? 'You already escalated this during the chat — correctly.'
+        : 'You escalated during the chat, but this case was resolvable at agent level.'
+    });
+  }
+
+  const shouldEscalate = Boolean(scenarios[session.scenario].escalationExpected);
   const decisionCorrect = Boolean(escalate) === shouldEscalate;
 
   const handover = { phone: phone || '', email: email || '', team: team || '' };
