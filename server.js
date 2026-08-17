@@ -295,7 +295,7 @@ setInterval(() => {
 }, 15 * 60 * 1000).unref();
 
 // --- Session Management ---
-app.post('/api/session/start', (req, res) => {
+app.post('/api/session/start', async (req, res) => {
   const { scenario } = req.body;
   const sessionId = `sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -333,9 +333,25 @@ app.post('/api/session/start', (req, res) => {
     forceFallback: false
   };
 
+  // Rephrase the opening line too. It is the first thing a visitor reads, and
+  // leaving it hardcoded made the AI look absent for the whole first screen.
+  const session = sessions[sessionId];
+  const scripted = scenarios[scenario].initialMessage;
+  let initialMessage = scripted;
+  let aiActive = false;
+
+  if (AI_ENABLED && AI_MODE === 'rephrase' && consumeAiBudget(req)) {
+    const rephrased = await rephraseInCharacter(session, scripted);
+    initialMessage = rephrased.text;
+    aiActive = rephrased.used;
+  }
+
+  session.history.push({ role: 'assistant', content: initialMessage });
+
   res.json({
     sessionId,
-    initialMessage: scenarios[scenario].initialMessage,
+    initialMessage,
+    aiActive,
     scenario
   });
 });
@@ -559,9 +575,13 @@ intent and any order IDs, amounts or facts. Keep it under 40 words. Stay in char
 and match the customer's emotional state. Reply with the rewritten line only — no
 quotes, no preamble, no explanation.
 
-The customer may be rude, but this runs on a public training page. Never write out a
-swear word in full: mask it the way the script does, as f*ck or sh*t. Never use slurs
-or sexual content, and never threaten violence.`
+Match the intensity of the line you are given — do not escalate it. If the original
+line contains no swearing, your rewrite must contain none either; only one of these
+scenarios is flagged to the trainee as using strong language.
+
+Where the original does swear, never write the word out in full: mask it the way the
+script does, as f*ck or sh*t. Never use slurs or sexual content, and never threaten
+violence.`
     },
     ...session.history.filter(m => m.role).slice(-6),
     { role: 'user', content: `Rewrite this line: ${scriptedLine}` }
@@ -663,6 +683,9 @@ app.post('/api/chat', async (req, res) => {
 
   let botResponse = scripted.botResponse;
   let apiUsed = 'fallback';
+  // null, not false: this turn produced no customer line to rewrite, so it has no
+  // verdict to report and must not overwrite the indicator set by the previous one.
+  let aiActive = null;
 
   // Terminations and the scoring feedback are verbatim training copy — rewriting
   // those would change what the trainee is told they did wrong.
@@ -676,7 +699,11 @@ app.post('/api/chat', async (req, res) => {
   if (rewritable) {
     const rephrased = await rephraseInCharacter(session, scripted.botResponse);
     botResponse = rephrased.text;
-    if (rephrased.used) apiUsed = 'openrouter';
+    aiActive = rephrased.used;
+    if (rephrased.used) apiUsed = AI_PROVIDER;
+  } else if (scripted.botResponse) {
+    // There was a line, and it went out unrewritten.
+    aiActive = false;
   }
 
   return res.json({
@@ -685,7 +712,7 @@ app.post('/api/chat', async (req, res) => {
     // and scoring. It says nothing about whether the AI ran — aiActive does, and
     // the two were being conflated in the UI.
     fallbackMode: true,
-    aiActive: apiUsed === 'openrouter',
+    aiActive,
     options: scripted.options,
     showEvidence: scripted.showEvidence,
     evidenceType: scripted.evidenceType,

@@ -218,9 +218,11 @@ async function startScenario(scenario) {
         
         const data = await response.json();
         sessionId = data.sessionId;
-        
-        // Add initial bot message
-        addMessage(scenarios[scenario].initialMessage, 'bot');
+
+        // Use the server's opening line — it is rephrased in character like every
+        // other customer line, so the AI is visible from the first screen.
+        addMessage(data.initialMessage || scenarios[scenario].initialMessage, 'bot');
+        updateAiStatus(data.aiActive);
         
         // Start timers
         startTimers();
@@ -567,6 +569,10 @@ async function sendMessage(message = null) {
 // options, so that flag must not be used to answer this question.
 function updateAiStatus(aiActive) {
     if (!apiStatus) return;
+    // null means the turn produced no customer line, so it carries no verdict —
+    // leave whatever the last real turn reported rather than overwriting it.
+    if (aiActive === undefined || aiActive === null) return;
+
     if (aiActive) {
         apiStatus.textContent = '🟢 AI live — replies in character';
         apiStatus.style.color = '#2ecc71';
