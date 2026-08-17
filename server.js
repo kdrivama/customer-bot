@@ -22,6 +22,9 @@ const scenarios = {
     orderId: 'PAY-789XLB',
     name: "Sarah Johnson",
     description: "Wrong Item Received",
+    // Her scenario card carries no strong-language warning, so her dialogue must
+    // stay clean however angry she gets.
+    allowsProfanity: false,
     initialMessage: "I ordered an iPhone 15 Pro but got an iPhone 14! This is unacceptable! I need a replacement now with compensation!",
     evidence: {
       barcode: "https://drive.google.com/file/d/1JWu_ht4350vqCv3ERzcuSvjv9Iqv3qOy",
@@ -145,6 +148,8 @@ const scenarios = {
     orderId: 'KLX-13PLC',
     name: "Michael Chen",
     description: "Return Rejected",
+    // His card shows the "Uses Strong Language" badge.
+    allowsProfanity: true,
     initialMessage: "What the f*ck! I returned those headphones because the product is damaged when i received, and now you're telling me I don't get a refund? I want to speak to someone who can actually help, or I'm going to report this to the police!",
     evidence: {
       damageImage: "https://drive.google.com/file/d/1zP60wW7ryl9XsCCTxxaMEddQl4vgMaDp"
@@ -340,7 +345,7 @@ app.post('/api/session/start', async (req, res) => {
   let initialMessage = scripted;
   let aiActive = false;
 
-  if (AI_ENABLED && AI_MODE === 'rephrase' && consumeAiBudget(req)) {
+  if (AI_ENABLED && (AI_MODE === 'chat' || AI_MODE === 'rephrase') && consumeAiBudget(req)) {
     const rephrased = await rephraseInCharacter(session, scripted);
     initialMessage = rephrased.text;
     aiActive = rephrased.used;
@@ -352,12 +357,20 @@ app.post('/api/session/start', async (req, res) => {
     sessionId,
     initialMessage,
     aiActive,
+    // Whether the trainee types their reply or picks from options. The client asks
+    // for nothing up front in chat mode — the customer has already spoken.
+    chatMode: AI_ENABLED && AI_MODE === 'chat' && aiActive,
     scenario
   });
 });
 
 // --- AI configuration ---
-const AI_MODE = process.env.AI_MODE || 'rephrase';
+// chat     - the trainee types freely and the AI plays the customer. The product.
+// rephrase - multiple-choice flow, AI only rewrites the customer's wording.
+// off      - fully scripted multiple choice, no AI calls.
+// The multiple-choice flow is the fallback under 'chat': it appears only when the
+// AI call fails, so the simulator degrades instead of stopping.
+const AI_MODE = process.env.AI_MODE || 'chat';
 
 // Both providers speak the OpenAI chat-completions shape, so only the base URL, the
 // key and the model names differ.
@@ -481,7 +494,7 @@ const AI_ENABLED = Boolean(AI_API_KEY) && AI_MODE !== 'off';
 // empty content if it runs out, so this stays well above the visible line length.
 const AI_MAX_TOKENS = 400;
 
-function callChatCompletion(messages, maxTokens, model, providerName) {
+function callChatCompletion(messages, maxTokens, model, providerName, jsonMode) {
   const name = providerName || AI_PROVIDER;
   const provider = PROVIDERS[name];
   const headers = {
@@ -498,17 +511,23 @@ function callChatCompletion(messages, maxTokens, model, providerName) {
 
   const baseUrl = name === AI_PROVIDER ? AI_BASE_URL : provider.baseUrl;
 
+  const body = {
+    model: model || AI_MODEL,
+    messages,
+    temperature: 0.7,
+    max_tokens: maxTokens,
+    top_p: 0.9,
+    frequency_penalty: 0.1,
+    presence_penalty: 0.1
+  };
+
+  // Both providers accept OpenAI's json_object mode. The parser tolerates its
+  // absence anyway, so an older model that ignores this still works.
+  if (jsonMode) body.response_format = { type: 'json_object' };
+
   return axios.post(
     `${baseUrl}/chat/completions`,
-    {
-      model: model || AI_MODEL,
-      messages,
-      temperature: 0.7,
-      max_tokens: maxTokens,
-      top_p: 0.9,
-      frequency_penalty: 0.1,
-      presence_penalty: 0.1
-    },
+    body,
     {
       headers,
       timeout: AI_PER_CALL_TIMEOUT_MS,
@@ -634,6 +653,191 @@ violence.`
   return { text: scriptedLine, used: false };
 }
 
+// --- AI role-play ---
+// One call per turn returns both the customer's next line and a judgement of the
+// trainee's message, so gating the scenario costs nothing beyond the reply itself.
+// The step machine still owns progression; the AI only decides whether this turn
+// satisfied the current step, which is what lets a trainee phrase it their own way.
+function roleplaySystemPrompt(session) {
+  const scenario = scenarios[session.scenario];
+  const step = scenario.steps[session.state.currentStep];
+  const objective = (step.options.find(o => o.correct) || {}).text || '';
+
+  return `${scenario.prompt}
+
+You are the CUSTOMER in a training simulator. The other party is a customer service
+agent in training. Never break character, never coach them, never mention training,
+scoring or that you are an AI.
+
+The agent's current objective for this stage is to do the equivalent of:
+"${objective}"
+
+Judge their latest message on substance, not wording. Any phrasing that genuinely
+achieves the objective counts — "may I have your reference number" is the same as
+asking for the order ID. Politeness alone is not enough; they must actually do it.
+
+If they achieved it, your reply must convey the substance of: "${step.correctResponse || 'acknowledge and move on'}"
+If they did not, react like: "${step.wrongResponse || 'press them again, unsatisfied'}"
+
+Keep your reply under 45 words and in character.
+
+${scenario.allowsProfanity
+  ? 'You swear when angry, but never write a swear word out in full — mask it as f*ck or sh*t.'
+  : 'You are angry and blunt but you NEVER swear. No profanity of any kind, not even masked.'}
+No slurs, no sexual content, no threats of violence.
+
+Reply with JSON only, no markdown fence:
+{"reply":"<your next message as the customer>","stepSatisfied":true|false,"empathy":true|false,"askedOrderId":true|false,"offeredSolution":true|false,"thanked":true|false,"closed":true|false,"unprofessional":true|false}
+
+empathy: did they acknowledge the customer's feelings?
+askedOrderId: did they ask for the order ID or an equivalent reference?
+offeredSolution: did they propose a concrete remedy?
+thanked: did they thank the customer?
+closed: did they properly close or ask if anything else is needed?
+unprofessional: were they rude, dismissive, blaming, or did they break policy?`;
+}
+
+function parseRoleplayJson(raw) {
+  if (!raw) return null;
+  let text = String(raw).trim();
+
+  // Models often wrap JSON in a markdown fence despite being told not to.
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) text = fence[1].trim();
+
+  // Or prepend a sentence before the object.
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1));
+    if (!parsed || typeof parsed.reply !== 'string' || !parsed.reply.trim()) return null;
+    return parsed;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function aiRoleplayTurn(session, message) {
+  const deadline = Date.now() + AI_TOTAL_BUDGET_MS;
+
+  const messages = [
+    { role: 'system', content: roleplaySystemPrompt(session) },
+    ...session.history.filter(m => m.role).slice(-10)
+  ];
+
+  for (const { provider, model } of AI_CHAIN) {
+    if (Date.now() >= deadline) break;
+    if (Date.now() < (aiCooldownUntil.get(provider) || 0)) continue;
+
+    try {
+      const response = await callChatCompletion(messages, AI_MAX_TOKENS, model, provider, true);
+
+      if (response.status === 429) {
+        const reset = readDailyQuotaReset(response.data);
+        if (reset) aiCooldownUntil.set(provider, reset);
+        continue;
+      }
+      if (response.status === 401 || response.status === 402 || response.status === 403) {
+        aiCooldownUntil.set(provider, Date.now() + 10 * 60 * 1000);
+        continue;
+      }
+      if (response.status !== 200 || !response.data.choices || !response.data.choices[0]) continue;
+
+      const parsed = parseRoleplayJson(response.data.choices[0].message.content);
+      if (!parsed) continue;
+
+      parsed.reply = maskProfanity(parsed.reply.trim().replace(/^["']|["']$/g, ''));
+      return parsed;
+    } catch (error) {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+// Applies a judged turn to the session: advances the step machine, scores, and
+// releases evidence or a hold exactly where the scripted flow would have.
+function applyRoleplayTurn(session, turn) {
+  const scenario = scenarios[session.scenario];
+  const state = session.state;
+  const step = scenario.steps[state.currentStep];
+
+  if (turn.empathy) state.empathyShown = true;
+  if (turn.askedOrderId) state.probing.orderId = true;
+  if (turn.offeredSolution) state.solutionOffered = true;
+  if (turn.thanked) state.thanked = true;
+  if (turn.closed) state.closed = true;
+
+  let showEvidence = false;
+  let evidenceType = null;
+  let waitingPeriod = null;
+
+  if (turn.stepSatisfied) {
+    state.points = Math.min(100, state.points + 15);
+    state.attemptCount = 0;
+
+    if (step.needsWait) {
+      state.points = Math.min(100, state.points + 5);
+      waitingPeriod = {
+        duration: 120000,
+        warningMessage: "Hello? Don't tell me you're ghosting me too!",
+        terminationMessage: 'This is what I expected. Typical!'
+      };
+    }
+
+    if (step.showEvidence) {
+      showEvidence = true;
+      evidenceType = session.scenario;
+    }
+
+    if (step.nextStep && step.nextStep !== 'completed') {
+      state.currentStep = step.nextStep;
+    } else if (step.nextStep === 'completed') {
+      state.terminated = true;
+      state.completed = true;
+      state.points = Math.min(100, state.points + 10);
+    }
+  } else {
+    state.attemptCount = (state.attemptCount || 0) + 1;
+    if (turn.unprofessional) {
+      state.violations.push({
+        category: 'wrong_response',
+        reason: 'Unprofessional or dismissive reply to the customer',
+        points: 10
+      });
+    }
+    // Free text deserves more latitude than picking from four options, so this is
+    // three strikes rather than the two the multiple-choice flow uses.
+    if (state.attemptCount >= 3) {
+      state.terminated = true;
+      state.violations.push({
+        category: 'termination',
+        reason: 'Customer gave up after repeated unhelpful replies',
+        points: 0
+      });
+    }
+  }
+
+  session.history.push({ role: 'assistant', content: turn.reply });
+
+  return {
+    botResponse: turn.reply,
+    // No options: the trainee types their own reply.
+    fallbackMode: false,
+    chatMode: true,
+    aiActive: true,
+    options: null,
+    showEvidence,
+    evidenceType,
+    waitingPeriod,
+    state,
+    apiUsed: AI_PROVIDER
+  };
+}
+
 // --- Hybrid Chat Endpoint ---
 app.post('/api/chat', async (req, res) => {
   const { sessionId, message, optionId } = req.body;
@@ -648,34 +852,18 @@ app.post('/api/chat', async (req, res) => {
   // Record user message in history for context
   session.history.push({ role: 'user', content: message });
 
-  // Freeform mode: the AI answers directly and the scripted trainer does not run.
-  // Kept for demos of the raw role-play; it produces no options, so the scoring
-  // and evidence flow stay idle.
-  if (AI_ENABLED && AI_MODE === 'freeform' && !session.forceFallback && consumeAiBudget(req)) {
-    try {
-      const response = await callChatCompletion([
-        {
-          role: 'system',
-          content: `${scenarios[session.scenario].prompt}\nCurrent step: ${session.state.currentStep}`
-        },
-        ...session.history.filter(m => m.role).slice(-10)
-      ], AI_MAX_TOKENS);
+  // --- Primary mode: the trainee types freely and the AI plays the customer. ---
+  // The multiple-choice flow below is the degraded path, used only when this fails.
+  const canChat = AI_ENABLED
+    && AI_MODE === 'chat'
+    && !optionId
+    && typeof message === 'string'
+    && message.trim().length > 0
+    && consumeAiBudget(req);
 
-      if (response.status === 200 && response.data.choices && response.data.choices[0]) {
-        const botResponse = response.data.choices[0].message.content;
-        session.history.push({ role: 'assistant', content: botResponse });
-
-        return res.json({
-          botResponse,
-          fallbackMode: false,
-          state: session.state,
-          apiUsed: 'openrouter'
-        });
-      }
-      session.forceFallback = true;
-    } catch (error) {
-      session.forceFallback = true;
-    }
+  if (canChat) {
+    const turn = await aiRoleplayTurn(session, message);
+    if (turn) return res.json(applyRoleplayTurn(session, turn));
   }
 
   // Scripted engine drives the session in every other mode.

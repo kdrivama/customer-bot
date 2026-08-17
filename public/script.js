@@ -124,6 +124,25 @@ let sessionEnded = false;
 let fallbackMode = false;
 let fallbackNotified = false;
 let waitingPeriod = null;
+// True while the trainee types their own replies. False once the session has
+// dropped to the multiple-choice fallback.
+let chatMode = false;
+
+// The composer and the option list are mutually exclusive: whichever is active is
+// how the trainee answers this turn.
+function setComposer(enabled) {
+    const display = enabled ? '' : 'none';
+    if (userInput) {
+        userInput.style.display = display;
+        userInput.disabled = !enabled;
+        userInput.placeholder = 'Type your reply to the customer…';
+    }
+    if (sendBtn) sendBtn.style.display = display;
+    if (enabled) {
+        const stale = document.querySelector('.options-container');
+        if (stale) stale.remove();
+    }
+}
 
 // Scenario data for evidence display
 const scenarios = {
@@ -166,7 +185,9 @@ document.addEventListener('DOMContentLoaded', () => {
         card.addEventListener('click', () => startScenario(card.dataset.scenario));
     });
 
-    sendBtn.addEventListener('click', sendMessage);
+    // Wrapped, not passed directly: as a listener it would receive the click event
+    // as its first argument and post that instead of what the trainee typed.
+    sendBtn.addEventListener('click', () => sendMessage());
     endChatBtn.addEventListener('click', endSession);
     userInput.addEventListener('keydown', e => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -223,15 +244,21 @@ async function startScenario(scenario) {
         // other customer line, so the AI is visible from the first screen.
         addMessage(data.initialMessage || scenarios[scenario].initialMessage, 'bot');
         updateAiStatus(data.aiActive);
+        chatMode = Boolean(data.chatMode);
+        setComposer(chatMode);
         
         // Start timers
         startTimers();
-        
-        // Send initial request to get first set of options
-        setTimeout(() => {
-            sendMessage("start");
-        }, 1000);
-        
+
+        // In chat mode the customer has already spoken and it is the trainee's turn,
+        // so nothing is requested up front. Only the multiple-choice fallback needs
+        // a priming call to fetch its first set of options.
+        if (!chatMode) {
+            setTimeout(() => {
+                sendMessage("start");
+            }, 1000);
+        }
+
     } catch (error) {
         console.error('Error starting session:', error);
         alert('Failed to start session. Please try again.');
@@ -340,11 +367,12 @@ function addMessage(text, sender, evidenceKey = null) {
 // Display multiple choice options
 function displayOptions(options) {
     if (!options || options.length === 0) return;
-    
-    // Hide text input and show options
-    userInput.style.display = 'none';
-    sendBtn.style.display = 'none';
-    
+
+    // Options only ever appear when the AI is unavailable, so their arrival is what
+    // drops the session out of chat mode.
+    chatMode = false;
+    setComposer(false);
+
     const optionsContainer = document.createElement('div');
     optionsContainer.classList.add('options-container');
     
@@ -505,68 +533,118 @@ function handleWaitingPeriod(waitingData) {
 
 // Enhanced sendMessage function
 async function sendMessage(message = null) {
-    const messageText = message || userInput.value.trim();
+    // Only an internal caller passes text; anything else came from an event handler.
+    const scripted = typeof message === 'string' ? message : null;
+    const messageText = scripted || userInput.value.trim();
     if (!messageText || sessionEnded) return;
-    
+
     // Add user message to UI if not from option selection
-    if (!message) {
+    if (!scripted) {
         addMessage(messageText, 'user');
         userInput.value = '';
     }
     
+    // The customer takes a moment to answer; leaving the box live invites the
+    // trainee to fire off a second message the AI has not seen yet.
+    const composerWasOpen = chatMode;
+    if (composerWasOpen) {
+        userInput.disabled = true;
+        sendBtn.disabled = true;
+        showTyping();
+    }
+
     try {
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sessionId, message: messageText })
         });
-        
+
         const data = await response.json();
-        
+        hideTyping();
+
         // Set fallback mode
         fallbackMode = data.fallbackMode;
         updateAiStatus(data.aiActive);
 
-        if (data.fallbackMode) {
-            // Show options if available
-            if (data.options) {
-                displayOptions(data.options);
-                return;
-            }
-        }
-        
         // Add bot response
         if (data.botResponse) {
             addMessage(data.botResponse, 'bot');
         }
-        
+
+        if (data.showEvidence && data.evidenceType) {
+            setTimeout(() => showEvidence(data.evidenceType), 1000);
+        }
+
+        if (data.waitingPeriod) {
+            handleWaitingPeriod(data.waitingPeriod);
+        }
+
         // ... keep existing code (state updates and timer resets)
         if (data.state && data.state.points !== undefined) {
             score = data.state.points;
             currentScore.textContent = `${score}/100`;
             updateStarRating();
         }
-        
+
         if (data.state && data.state.violations) {
             violations = data.state.violations;
             if (data.state.violations.length > 0) {
                 violationWarnings.textContent = data.state.violations[0].reason;
             }
         }
-        
+
+        // Options arriving means the AI dropped out and this session is now running
+        // the multiple-choice fallback.
+        if (data.options && data.options.length) {
+            displayOptions(data.options);
+        } else if (data.chatMode) {
+            chatMode = true;
+            setComposer(true);
+            userInput.disabled = false;
+            sendBtn.disabled = false;
+            userInput.focus();
+        }
+
+        if (data.state && data.state.terminated) {
+            userInput.disabled = true;
+            sendBtn.disabled = true;
+            sessionEnded = true;
+            setTimeout(() => endSession(), 2500);
+        }
+
         inactivitySeconds = 180;
         inactivityTimer.textContent = `${inactivitySeconds}s`;
-        
+
     } catch (error) {
         console.error('Communication error:', error);
-        addMessage("I'm experiencing technical difficulties, but I can still help you...", 'bot');
-        fallbackMode = true;
+        hideTyping();
+        addMessage("Sorry, that didn't send. Try again.", 'bot');
+        if (composerWasOpen) {
+            userInput.disabled = false;
+            sendBtn.disabled = false;
+        }
     }
 }
 
-// Report whether the customer's last line was rewritten by the AI or came straight
-// from the script. Every turn is "fallbackMode" because the script always drives the
-// options, so that flag must not be used to answer this question.
+function showTyping() {
+    hideTyping();
+    const el = document.createElement('div');
+    el.id = 'typing-indicator';
+    el.className = 'system-message';
+    el.textContent = `${customerName.textContent || 'The customer'} is typing…`;
+    chatMessages.appendChild(el);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function hideTyping() {
+    const el = document.getElementById('typing-indicator');
+    if (el) el.remove();
+}
+
+// Report whether the customer's last line came from the AI or straight from the
+// script. fallbackMode describes which control the trainee answers with, not whether
+// the AI ran, so it must not be used to answer this question.
 function updateAiStatus(aiActive) {
     if (!apiStatus) return;
     // null means the turn produced no customer line, so it carries no verdict —

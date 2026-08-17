@@ -8,7 +8,7 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: AI_MODE
-        value: rephrase
+        value: chat
       - key: AI_PROVIDER
         value: deepseek
       # Blank uses the provider default: deepseek-chat for DeepSeek.
